@@ -7,4 +7,4 @@ See `examples/basic` for basic usage and tips on how to use the wrapper.
 
 ## How to use
 
-`go get github.com/ffhan/igotify`
+`go get github.com/ffhan/igotify@v0.1.0`
