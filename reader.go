@@ -2,8 +2,10 @@ package igotify
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -14,6 +16,7 @@ const (
 
 var (
 	ErrStopped = errors.New("reader is stopped")
+	ErrTimeout = errors.New("reader timeout")
 )
 
 // reader is a wrapper for reading and controlling inotify events.
@@ -49,13 +52,28 @@ func NewReader(bufferSize int, flags int) (*reader, error) {
 
 // retrieves a single InotifyEvent, blocks until a read can be completed.
 //
-// returns an error if a reader has been stopped.
+// returns an error if the reader has been stopped (ErrStopped).
 func (r *reader) Get() (InotifyEvent, error) {
 	event, ok := <-r.resultChan
 	if !ok {
 		return event, ErrStopped
 	}
 	return event, nil
+}
+
+// retrieves a single InotifyEvent, blocks until a read can be completed or until a timeout.
+//
+// returns an error if the reader has been stopped (ErrStopped) or a timeout (ErrTimeout) happened.
+func (r *reader) GetWithTimeout(timeout time.Duration) (InotifyEvent, error) {
+	select {
+	case event, ok := <-r.resultChan:
+		if !ok {
+			return event, ErrStopped
+		}
+		return event, nil
+	case <-time.After(timeout):
+		return InotifyEvent{}, ErrTimeout
+	}
 }
 
 // add a watcher - use masks defined in syscall.
@@ -86,6 +104,7 @@ func (r *reader) RemoveWatcher(wd int) error {
 //
 // Listen should be called in a separate goroutine because it is a blocking function.
 func (r *reader) Listen() error {
+	defer close(r.resultChan)
 	const iSize = syscall.SizeofInotifyEvent
 
 	if r.stopped {
@@ -97,6 +116,9 @@ func (r *reader) Listen() error {
 		var event *syscall.InotifyEvent
 		read, err := syscall.Read(r.fd, buffer) // might hang here indefinitely
 		if err != nil {
+			if err == syscall.EBADF { // if fd not open return without error - we're expecting this.
+				return nil
+			}
 			return err
 		}
 
@@ -107,7 +129,7 @@ func (r *reader) Listen() error {
 			start := offset + iSize
 			name := string(buffer[start : start+int(event.Len)])
 
-			r.resultChan <- makeInotifyEvent(event, name)
+			r.resultChan <- makeInotifyEvent(event, strings.TrimRight(name, "\000"))
 			offset += iSize + int(event.Len)
 		}
 	}
@@ -118,7 +140,6 @@ func (r *reader) Listen() error {
 //
 // a stopped reader cannot be started (by calling Listen) again.
 func (r *reader) Stop() {
-	defer close(r.resultChan)
 	r.stopped = true
 	r.wdMutex.Lock()
 	for wd := range r.wds {
