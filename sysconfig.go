@@ -9,6 +9,7 @@ long get_name_max() {
 }
 */
 import "C"
+import "log"
 
 var (
 	nameMax = 0 // represents NAME_MAX from GNU sysconfig
@@ -18,7 +19,8 @@ func init() {
 	// set nameMax to value of cgo get_name_max() resulting value
 	nameMax = int(C.get_name_max())
 	if nameMax <= 0 {
-		panic("cannot get NAME_MAX value from the system!")
+		log.Println("get_name_max() failed - assuming NAME_MAX is 255")
+		nameMax = 255
 	}
 }
 
