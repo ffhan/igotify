@@ -284,3 +284,80 @@ func TestReader_GetWithTimeout_Timeout(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestReader_Listen_Repeated(t *testing.T) {
+	r, err := NewReader(128, DefaultFlags)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resultChan := make(chan bool, 1)
+
+	go func() {
+		resultChan <- true
+		if err := r.Listen(); err != nil {
+			t.Fatalf("cannot begin listen: %v", err)
+		}
+	}()
+	defer r.Stop()
+
+	<-resultChan
+
+	go func() {
+		if err := r.Listen(); err != nil {
+			if errors.Is(err, ErrListening) {
+				resultChan <- true
+				return
+			} else {
+				t.Fatalf("expected error %v, got %v", ErrListening, err)
+			}
+		} else {
+			t.Fatal("expected error from repeated listen, got nil")
+		}
+	}()
+
+	select {
+	case <-resultChan:
+		return
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("repeated listen got through, but should've failed")
+	}
+}
+
+func TestReader_Listen_AfterStop(t *testing.T) {
+	r, err := NewReader(128, DefaultFlags)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resultChan := make(chan bool, 1)
+
+	go func() {
+		resultChan <- true
+		if err := r.Listen(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	<-resultChan
+	r.Stop()
+
+	go func() {
+		if err = r.Listen(); err != nil {
+			if errors.Is(err, ErrStopped) {
+				resultChan <- true
+				return
+			} else {
+				t.Fatalf("expected error %v, got %v", ErrStopped, err)
+			}
+		} else {
+			t.Fatal("expected Listen() to return an error, got nil")
+		}
+	}()
+
+	select {
+	case <-resultChan:
+		return
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout while waiting for test to finish")
+	}
+}

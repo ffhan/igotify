@@ -15,8 +15,9 @@ const (
 )
 
 var (
-	ErrStopped = errors.New("reader is stopped")
-	ErrTimeout = errors.New("reader timeout")
+	ErrStopped   = errors.New("reader is stopped")
+	ErrTimeout   = errors.New("reader timeout")
+	ErrListening = errors.New("reader is already listening")
 )
 
 // reader is a wrapper for reading and controlling inotify events.
@@ -26,6 +27,7 @@ type reader struct {
 	wdMutex    sync.Mutex        // watch descriptor mutex
 	bufferSize int               // read buffer size (in sizeof(inotify_event))
 	resultChan chan InotifyEvent //
+	listening  bool              // indicates whether the Listen method has been called
 	stopped    bool              // indicates whether the fd and wds are closed
 }
 
@@ -104,19 +106,43 @@ func (r *reader) RemoveWatcher(wd int) error {
 //
 // Listen should be called in a separate goroutine because it is a blocking function.
 func (r *reader) Listen() error {
+	if r.listening {
+		return ErrListening
+	}
+	r.listening = true
+
 	defer close(r.resultChan)
 	const iSize = syscall.SizeofInotifyEvent
 
 	if r.stopped {
 		return ErrStopped
 	}
-	buffer := make([]byte, iSize*r.bufferSize)
+	/*
+		sizeof(inotify_event) * r.bufferSize ensures we can store max bufferSize
+		 events with empty names
+		there are two extremes we have to take care of:
+		- bufferSize number of events with no filename attached (len 0)
+		- 1 event with maximum allowed filename length
+
+		Anything in between is not a problem because read() shouldn't give us less than the whole inotify_event structs in the buffer.
+
+		So, when we receive no filenames we can receive bufferSize events from the same read() syscall.
+		NAME_MAX + 1 serves two purposes: NAME_MAX ensures we can store at least one event with max filename path
+		and +1 ensures we can store the \0 byte (end of the string).
+
+		In that case, we can store at least bufferSize-1 additional events with empty filenames.
+		Realistically, we mostly expect short filenames or empty filenames, and all the cases in between should be handled by read() syscall.
+
+		Practically this means we can store minimum of 1 event with max filename up top bufferSize events with no filename provided.
+	*/
+
+	buffer := make([]byte, iSize*r.bufferSize+GetNameMax()+1)
 
 	for !r.stopped {
 		var event *syscall.InotifyEvent
 		read, err := syscall.Read(r.fd, buffer) // might hang here indefinitely
 		if err != nil {
-			if err == syscall.EBADF { // if fd not open return without error - we're expecting this.
+			if err == syscall.EBADF && r.stopped { // if fd not open return without error - we're expecting this.
 				return nil
 			}
 			return err
@@ -141,6 +167,7 @@ func (r *reader) Listen() error {
 // a stopped reader cannot be started (by calling Listen) again.
 func (r *reader) Stop() {
 	r.stopped = true
+	r.listening = false
 	r.wdMutex.Lock()
 	for wd := range r.wds {
 		_, _ = syscall.InotifyRmWatch(r.fd, wd)
